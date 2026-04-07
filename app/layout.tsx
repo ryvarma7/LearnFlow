@@ -9,7 +9,7 @@ const poppins = Poppins({
 })
 
 export const metadata: Metadata = {
-  title: 'PathForge',
+  title: 'LearnFlow',
   description: 'AI-Generated Learning Roadmaps',
 }
 

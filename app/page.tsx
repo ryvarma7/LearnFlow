@@ -44,7 +44,7 @@ export default function Home() {
             Turn "I want to learn X" into a roadmap that actually works.
           </h1>
           <p className="mt-6 text-[#6b7280] max-w-[520px] text-lg sm:text-[19px] font-[400] leading-relaxed">
-            PathForge generates a personalized, visual, phase-by-phase learning path based on your goal, your time, and your level.
+            LearnFlow generates a personalized, visual, phase-by-phase learning path based on your goal, your time, and your level.
           </p>
           <motion.button 
             whileHover={{ scale: 1.03, boxShadow: "0 0 24px var(--accent-glow)" }}
