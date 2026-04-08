@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Inter } from 'next/font/google';
 import { AnimatePresence, motion } from 'framer-motion';
@@ -93,6 +93,21 @@ function stripTaskPrefix(name: string): string {
   return name.replace(/^(Watch|Read|Practice|Build):\s*/i, '').trim();
 }
 
+function getParentTopicIdFromDailyId(dailyId: string): string | null {
+  const marker = '__daily__';
+  if (dailyId.includes(marker)) {
+    return dailyId.split(marker)[0] || null;
+  }
+
+  // Legacy IDs before the __daily__ marker was introduced.
+  const legacyMatch = dailyId.match(/^(.*)-(subtask-\d+|res-\d+|build)$/);
+  if (legacyMatch && legacyMatch[1]) {
+    return legacyMatch[1];
+  }
+
+  return null;
+}
+
 function detectGoalProfile(domainText: string): GoalProfile {
   const text = domainText.toLowerCase();
 
@@ -158,6 +173,22 @@ function createResourceTaskName(
   return getPracticeTaskLabel(profile, resource.label);
 }
 
+function mergeResourcesWithDocsFirst(
+  primary: TopicNode['resources'][number][],
+  allOriginal: TopicNode['resources'][number][]
+): TopicNode['resources'] {
+  const docs = allOriginal.filter((resource) => resource.type === 'docs');
+  const combined = [...docs, ...primary, ...allOriginal];
+  const seen = new Set<string>();
+
+  return combined.filter((resource) => {
+    const key = `${resource.type}|${resource.url}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function createBuildTaskName(topicName: string, profile: GoalProfile): string {
   if (profile === 'coding') return `Ship: ${topicName}`;
   if (profile === 'data') return `Analyze: ${topicName}`;
@@ -205,7 +236,6 @@ export default function RoadmapPage() {
     setDomain,
     setSubTrack,
     setCompletedTopics,
-    toggleTopic,
   } = useStore();
   const router = useRouter();
 
@@ -304,31 +334,6 @@ export default function RoadmapPage() {
     localStorage.setItem('pf_user_name', userName);
   }, [userName]);
 
-  useEffect(() => {
-    if (!selectedDomain || !selectedSubTrack) return;
-
-    if (prevCompletedRef.current === null) {
-      prevCompletedRef.current = completedTopics.length;
-      return;
-    }
-
-    if (completedTopics.length === prevCompletedRef.current) return;
-
-    const today = dayKey(new Date());
-    setActiveDayKeys((prev) => {
-      const merged = Array.from(new Set([...prev, today])).sort();
-      try {
-        const hash = makeHash(selectedDomain, selectedSubTrack);
-        localStorage.setItem(`pf_activity_${hash}`, JSON.stringify(merged));
-      } catch {
-        // Best effort persistence only.
-      }
-      return merged;
-    });
-
-    prevCompletedRef.current = completedTopics.length;
-  }, [completedTopics.length, selectedDomain, selectedSubTrack]);
-
   const handleCopyText = () => {
     if (!generatedRoadmap) return;
 
@@ -352,7 +357,7 @@ export default function RoadmapPage() {
     try {
       await exportToPDF(generatedRoadmap, {
         userName,
-        completedTopicIds: completedTopics,
+        completedTopicIds: completedBaseTopicIds,
         sections: plannedPhases.map((phase) => ({
           id: phase.id,
           name: phase.name,
@@ -423,7 +428,7 @@ export default function RoadmapPage() {
 
   const totals = useMemo(() => {
     if (!generatedRoadmap) {
-      return { topicCount: 0, hours: 0, phaseCount: 0, progress: 0 };
+      return { topicCount: 0, hours: 0, phaseCount: 0 };
     }
 
     const topicCount = generatedRoadmap.phases.reduce((sum, phase) => sum + phase.topics.length, 0);
@@ -432,9 +437,8 @@ export default function RoadmapPage() {
       0
     );
     const phaseCount = generatedRoadmap.phases.length;
-    const progress = topicCount > 0 ? (completedTopics.length / topicCount) * 100 : 0;
-    return { topicCount, hours, phaseCount, progress };
-  }, [completedTopics.length, generatedRoadmap]);
+    return { topicCount, hours, phaseCount };
+  }, [generatedRoadmap]);
 
   const allTopics = useMemo(() => {
     if (!generatedRoadmap) return [];
@@ -496,32 +500,32 @@ export default function RoadmapPage() {
     const granularDailyTasks: TopicNode[] = allTopics.flatMap((topic) => {
       const subtopics = getSubtopicsForTopic(topic);
       const resourceTasks = topic.resources.map((resource, idx) => ({
-        id: `${topic.id}-res-${idx + 1}`,
+        id: `${topic.id}__daily__res-${idx + 1}`,
         name: createResourceTaskName(resource, goalProfile),
         estimatedHours: resource.type === 'video' ? 1 : 1,
         difficulty: topic.difficulty,
         description: `Use this resource to move ${topic.name} forward`,
-        resources: [resource],
+        resources: mergeResourcesWithDocsFirst([resource], topic.resources),
         projectIdea: topic.projectIdea,
       }));
 
       const subtopicTasks = subtopics.map((subtopic, idx) => ({
-        id: `${topic.id}-subtask-${idx + 1}`,
+        id: `${topic.id}__daily__subtask-${idx + 1}`,
         name: subtopic.label,
         estimatedHours: Math.max(1, Math.ceil(topic.estimatedHours / Math.max(subtopics.length, 1))),
         difficulty: topic.difficulty,
         description: `Daily subtopic from ${topic.name}`,
-        resources: topic.resources,
+        resources: mergeResourcesWithDocsFirst(topic.resources, topic.resources),
         projectIdea: topic.projectIdea,
       }));
 
       const buildTask: TopicNode = {
-        id: `${topic.id}-build`,
+        id: `${topic.id}__daily__build`,
         name: createBuildTaskName(topic.name, goalProfile),
         estimatedHours: Math.max(1, Math.ceil(topic.estimatedHours / 3)),
         difficulty: topic.difficulty,
         description: `Finish a concrete deliverable for ${topic.name}`,
-        resources: topic.resources,
+        resources: mergeResourcesWithDocsFirst(topic.resources, topic.resources),
         projectIdea: topic.projectIdea,
       };
 
@@ -568,6 +572,115 @@ export default function RoadmapPage() {
     [dailyPhases, plannerMode, weeklyPhases]
   );
 
+  const baseTopicIdSet = useMemo(() => new Set(allTopics.map((topic) => topic.id)), [allTopics]);
+
+  const dailyChildrenByBase = useMemo(() => {
+    const map = new Map<string, string[]>();
+
+    dailyPhases.forEach((phase) => {
+      phase.topics.forEach((topic) => {
+        const parentId = getParentTopicIdFromDailyId(topic.id);
+        if (!parentId || !baseTopicIdSet.has(parentId)) return;
+
+        const existing = map.get(parentId) ?? [];
+        map.set(parentId, [...existing, topic.id]);
+      });
+    });
+
+    return map;
+  }, [baseTopicIdSet, dailyPhases]);
+
+  const completedTopicSet = useMemo(() => new Set(completedTopics), [completedTopics]);
+
+  const isTopicCompleted = useCallback(
+    (topicId: string) => {
+      const parentId = getParentTopicIdFromDailyId(topicId);
+
+      // Daily task is complete if itself is done OR parent topic is done.
+      if (parentId && baseTopicIdSet.has(parentId)) {
+        return completedTopicSet.has(topicId) || completedTopicSet.has(parentId);
+      }
+
+      // Base weekly topic is complete if itself is done OR all child daily tasks are done.
+      const childDailyIds = dailyChildrenByBase.get(topicId);
+      if (childDailyIds && childDailyIds.length > 0) {
+        return completedTopicSet.has(topicId) || childDailyIds.every((id) => completedTopicSet.has(id));
+      }
+
+      return completedTopicSet.has(topicId);
+    },
+    [baseTopicIdSet, completedTopicSet, dailyChildrenByBase]
+  );
+
+  const completedBaseTopicIds = useMemo(
+    () => allTopics.map((topic) => topic.id).filter((topicId) => isTopicCompleted(topicId)),
+    [allTopics, isTopicCompleted]
+  );
+
+  const completedBaseTopicCount = completedBaseTopicIds.length;
+
+  useEffect(() => {
+    if (!selectedDomain || !selectedSubTrack) return;
+
+    if (prevCompletedRef.current === null) {
+      prevCompletedRef.current = completedBaseTopicCount;
+      return;
+    }
+
+    if (completedBaseTopicCount === prevCompletedRef.current) return;
+
+    const today = dayKey(new Date());
+    setActiveDayKeys((prev) => {
+      const merged = Array.from(new Set([...prev, today])).sort();
+      try {
+        const hash = makeHash(selectedDomain, selectedSubTrack);
+        localStorage.setItem(`pf_activity_${hash}`, JSON.stringify(merged));
+      } catch {
+        // Best effort persistence only.
+      }
+      return merged;
+    });
+
+    prevCompletedRef.current = completedBaseTopicCount;
+  }, [completedBaseTopicCount, selectedDomain, selectedSubTrack]);
+
+  const toggleTopicWithSync = useCallback(
+    (topicId: string) => {
+      const nextSet = new Set(completedTopics);
+      const currentlyCompleted = isTopicCompleted(topicId);
+      const parentId = getParentTopicIdFromDailyId(topicId);
+
+      if (parentId && baseTopicIdSet.has(parentId)) {
+        const siblings = dailyChildrenByBase.get(parentId) ?? [];
+
+        if (currentlyCompleted) {
+          // Unchecking a daily task should also uncheck the parent.
+          nextSet.delete(topicId);
+          nextSet.delete(parentId);
+        } else {
+          nextSet.add(topicId);
+          const allDone = siblings.every((id) => id === topicId || nextSet.has(id));
+          if (allDone) {
+            nextSet.add(parentId);
+          }
+        }
+      } else {
+        const children = dailyChildrenByBase.get(topicId) ?? [];
+
+        if (currentlyCompleted) {
+          nextSet.delete(topicId);
+          children.forEach((id) => nextSet.delete(id));
+        } else {
+          nextSet.add(topicId);
+          children.forEach((id) => nextSet.add(id));
+        }
+      }
+
+      setCompletedTopics(Array.from(nextSet));
+    },
+    [baseTopicIdSet, completedTopics, dailyChildrenByBase, isTopicCompleted, setCompletedTopics]
+  );
+
   useEffect(() => {
     if (plannedPhases.length === 0) return;
 
@@ -584,17 +697,17 @@ export default function RoadmapPage() {
   const completedSectionCount = useMemo(
     () =>
       plannedPhases.filter(
-        (phase) => phase.topics.length > 0 && phase.topics.every((topic) => completedTopics.includes(topic.id))
+        (phase) => phase.topics.length > 0 && phase.topics.every((topic) => isTopicCompleted(topic.id))
       ).length,
-    [completedTopics, plannedPhases]
+    [isTopicCompleted, plannedPhases]
   );
 
   const currentSectionIndex = useMemo(() => {
     if (plannedPhases.length === 0) return -1;
     return plannedPhases.findIndex(
-      (phase) => !phase.topics.every((topic) => completedTopics.includes(topic.id))
+      (phase) => !phase.topics.every((topic) => isTopicCompleted(topic.id))
     );
-  }, [completedTopics, plannedPhases]);
+  }, [isTopicCompleted, plannedPhases]);
 
   const streakSummary = useMemo(() => {
     const activity = new Set(activeDayKeys);
@@ -639,9 +752,11 @@ export default function RoadmapPage() {
 
   if (!generatedRoadmap) return null;
 
+  const progressPercent = totals.topicCount > 0 ? (completedBaseTopicCount / totals.topicCount) * 100 : 0;
+
   const ringRadius = 46;
   const ringCircumference = 2 * Math.PI * ringRadius;
-  const ringOffset = ringCircumference - (totals.progress / 100) * ringCircumference;
+  const ringOffset = ringCircumference - (progressPercent / 100) * ringCircumference;
 
   return (
     <PageWrapper>
@@ -700,7 +815,7 @@ export default function RoadmapPage() {
                 {isExporting ? 'Exporting...' : 'Export PDF'}
               </button>
               <div className="ml-1 text-sm text-[#6B7280]">
-                <span className="text-[#FFFFFF]">{completedTopics.length}</span> / {totals.topicCount}
+                <span className="text-[#FFFFFF]">{completedBaseTopicCount}</span> / {totals.topicCount}
               </div>
             </div>
           </header>
@@ -744,12 +859,12 @@ export default function RoadmapPage() {
                         />
                       </svg>
                       <div className="absolute inset-0 flex items-center justify-center text-xl font-semibold">
-                        {Math.round(totals.progress)}%
+                        {Math.round(progressPercent)}%
                       </div>
                     </div>
                     <div className="text-sm text-[#6B7280]">
-                      <p className="text-[#FFFFFF]">{completedTopics.length} topics done</p>
-                      <p>{totals.topicCount - completedTopics.length} topics remaining</p>
+                      <p className="text-[#FFFFFF]">{completedBaseTopicCount} topics done</p>
+                      <p>{totals.topicCount - completedBaseTopicCount} topics remaining</p>
                     </div>
                   </div>
                 </div>
@@ -842,7 +957,7 @@ export default function RoadmapPage() {
             <section className="relative min-w-0 pb-4">
               <div className="space-y-4">
                 {plannedPhases.map((phase, index) => {
-                  const phaseCompleted = phase.topics.filter((t) => completedTopics.includes(t.id)).length;
+                  const phaseCompleted = phase.topics.filter((t) => isTopicCompleted(t.id)).length;
                   const phaseProgress = phase.topics.length
                     ? (phaseCompleted / phase.topics.length) * 100
                     : 0;
@@ -925,7 +1040,7 @@ export default function RoadmapPage() {
                                 <div className="grid gap-4 lg:grid-cols-[minmax(0,1.5fr)_minmax(300px,1fr)]">
                                   <div className="grid gap-3">
                                     {phase.topics.map((topic) => {
-                                      const isCompleted = completedTopics.includes(topic.id);
+                                      const isCompleted = isTopicCompleted(topic.id);
                                       const resourceOpen = !!openResources[topic.id];
                                       const isActiveTopic = activeTopic?.id === topic.id;
 
@@ -949,7 +1064,7 @@ export default function RoadmapPage() {
                                               aria-label={isCompleted ? 'Mark topic incomplete' : 'Mark topic complete'}
                                               onClick={(event) => {
                                                 event.stopPropagation();
-                                                toggleTopic(topic.id);
+                                                toggleTopicWithSync(topic.id);
                                               }}
                                               className="shrink-0 text-[#FFFFFF]"
                                             >
@@ -1005,7 +1120,9 @@ export default function RoadmapPage() {
                                                   className="overflow-hidden"
                                                 >
                                                   <div className="flex flex-wrap gap-1.5 px-3 pb-3">
-                                                    {topic.resources.slice(0, 4).map((resource, resourceIndex) => (
+                                                    {mergeResourcesWithDocsFirst(topic.resources, topic.resources)
+                                                      .slice(0, 4)
+                                                      .map((resource, resourceIndex) => (
                                                       <a
                                                         key={`${topic.id}-${resourceIndex}`}
                                                         href={resource.url}

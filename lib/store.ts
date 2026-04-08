@@ -33,7 +33,18 @@ export const useStore = create<AppState>((set, get) => ({
   setExtraNotes: (notes) => set({ extraNotes: notes }),
   setPreferences: (preferences) => set({ preferences }),
   setRoadmap: (roadmap) => set({ generatedRoadmap: roadmap }),
-  setCompletedTopics: (topics) => set({ completedTopics: topics }),
+  setCompletedTopics: (topics) => {
+    set((state) => {
+      if (typeof window !== 'undefined' && state.selectedDomain && state.selectedSubTrack) {
+        try {
+          const hash = btoa(state.selectedDomain + state.selectedSubTrack).slice(0, 8);
+          localStorage.setItem(`pf_progress_${hash}`, JSON.stringify(topics));
+        } catch {}
+      }
+
+      return { completedTopics: topics };
+    });
+  },
   
   toggleTopic: (id) => {
     set((state) => {
